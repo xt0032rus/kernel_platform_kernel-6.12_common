@@ -946,6 +946,24 @@ static bool legitimize_mnt(struct vfsmount *bastard, unsigned seq)
 	return false;
 }
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+/* A hidden mount can still be needed to reach a visible mount stacked on it. */
+static bool susfs_has_visible_overmount(struct mount *mnt)
+{
+	struct hlist_head *head = m_hash(&mnt->mnt, mnt->mnt.mnt_root);
+	struct mount *child;
+
+	hlist_for_each_entry_rcu(child, head, mnt_hash) {
+		if (child->mnt_parent == mnt &&
+		    child->mnt_mountpoint == mnt->mnt.mnt_root &&
+		    child->mnt_id < DEFAULT_KSU_MNT_ID)
+			return true;
+	}
+
+	return false;
+}
+#endif
+
 /**
  * __lookup_mnt - find first child mount
  * @mnt:	parent mount
@@ -976,10 +994,13 @@ struct mount *__lookup_mnt(struct vfsmount *mnt, struct dentry *dentry)
 	//   spawned process since it just inherits the init mount namespace, and here
 	//   we also spoof for the zygote spawned processes that are marked umounted,
 	//   with this hack, we do not even need to umount those sus mounts.
-	// - The solution here is simply to return the legit mount.
+	// - Keep hidden bridge mounts traversable when a legit mount covers them,
+	//   otherwise paths such as /dev/binderfs become unreachable to apps.
 	if (susfs_is_current_proc_umounted()) {
 		hlist_for_each_entry_rcu(p, head, mnt_hash)
-			if (p->mnt_id < DEFAULT_KSU_MNT_ID && &p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry)
+			if (&p->mnt_parent->mnt == mnt && p->mnt_mountpoint == dentry &&
+			    (p->mnt_id < DEFAULT_KSU_MNT_ID ||
+			     susfs_has_visible_overmount(p)))
 				return p;
 		return NULL;
 	}
